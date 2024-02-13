@@ -5,6 +5,8 @@
 
 <img src="https://drive.google.com/uc?export=download&id=1CWPl6SvKi1eiyztICENNIO4bYR9Uc9qY" title="Sound Wave" width=500 >
 
+[Demo Link](https://htmlpreview.github.io/?https://github.com/peihenglyu/Sound-Wave-Simulation/blob/main/sound.html)
+
 Method: Simulating Sound Waves with Mesh Points
 
 The demo for this project can be viewed in the sound.html file included in the submission. (The animation may not be completely stable, so if it becomes slow or crashes, please refresh the page.) In the animation, a 3D room is simulated, with sound waves represented by numerous points. These points mimic the physical behavior of sound waves at a lower resolution. The main idea behind this method is to capture the reverberation characteristics of any 3D space, as long as the boundaries of the space are provided.
