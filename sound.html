@@ -1,0 +1,1024 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Sound wave final</title>
+    <script>
+/**
+ * This function maps the controlOptions to an on-screen form and sends
+ * changes in the on-screen form to the `setupScene` callback. 
+ * 
+ * You do not need to understand this code for any part of this class, but
+ * its internal comments can help you do so if you are personally interested.
+ */
+ window.addEventListener('load', event=> {
+    let c = document.querySelector('#set1')
+    // loop over the key:value pairs in the controlOptions object
+    Object.entries(controlOptions).forEach(([key,opt]) => {
+        // make a radio button in a label for each item
+        let r = document.createElement('input')
+        r.type = 'radio'
+        r.name = 'controlOptions'
+        r.value = key
+        let l = document.createElement('label')
+        l.append(r)
+        l.append(' ' + opt.label)
+        c.append(l)
+        // also listen for the radio button being selected to configure options
+        r.addEventListener('change', event => {
+            let k = event.target.value
+            // erase any options from previous selections
+            let d = document.querySelector('#set2')
+            while (d.firstChild) d.firstChild.remove()
+            // loop over each of the selected item's options
+            if (opt.options) Object.entries(opt.options).forEach(([key,opt2]) => {
+                if (opt2.type == 'radio') {
+                    // if it's a radio-type, it's actually a list of options;
+                    Object.entries(opt2.options).forEach(([v,l]) => {
+                        // make one radio button and label for option
+                        let rb = document.createElement('input')
+                        rb.type = 'radio'
+                        rb.name = key
+                        rb.value = v
+                        let lab = document.createElement('label')
+                        lab.append(rb)
+                        lab.append(l)
+                        d.append(lab)
+                    })
+                    // and select the first radio button by default
+                    d.querySelector('input[name="'+key+'"]').click()
+                } else if (opt2.type == 'checkbox') {
+                    let cb = document.createElement('input')
+                    cb.type = opt2.type
+                    cb.name = key
+                    cb.value = key
+                    cb.checked = opt2.default
+                    let lab = document.createElement('label')
+                    lab.append(cb)
+                    lab.append(opt2.label)
+                    d.append(lab)
+                } else {
+                    // not a radio, so it's a number, checkbox, or text type
+                    // make an appropriate input element and label
+                    let num = document.createElement('input')
+                    num.type = opt2.type
+                    num.name = key
+                    num.value = opt2.default // for number, text
+                    num.step = 'any' // for number; ignored otherwise
+                    let lab = document.createElement('label')
+                    lab.append(num)
+                    lab.append(opt2.label)
+                    d.append(lab)
+                }
+            })
+        })
+    })
+    // select the first radio button by default
+    c.querySelector('input[type="radio"]').click()
+    
+    // register a callback for the button too
+    let b = document.querySelector('.controls input[type="submit"]')
+    b.addEventListener('click', event => {
+        event.preventDefault() // don't send the server a POST action
+        // retrieve form data
+        let form = document.querySelector('form')
+        let data = new FormData(form)
+        // extract and delete the top-level form item
+        let scene = data.get('controlOptions')
+        data.delete('controlOptions')
+        // copy other content, converting number types and adding defaults as needed
+        let options = Object.fromEntries(Array.from(data.entries()).map(([k,v])=>{
+            let t = controlOptions[scene].options?.[k]?.['type']
+            let d = controlOptions[scene].options?.[k]?.['default']
+            if (t == 'number') return [k, Number(v)||d||0]
+            if (t == 'checkbox') return [k, true] // only in formdata if true
+            return [k,v]
+        }))
+        // add any missing options if they have defaults
+        if (controlOptions[scene].options) Object.entries(controlOptions[scene].options).forEach(([k,v])=>{
+            if (!(k in options)) {
+                 if (v.type == 'checkbox') options[k] = false
+                 else if ('default' in v) options[k] = v.default
+            }
+        })
+        // send the result to the scene generating callback function
+        setupScene(scene, options)
+    })
+})
+
+    </script><!-- handles controls -->
+    <script src="https://cdn.plot.ly/plotly-2.20.0.min.js" charset="utf-8"></script>
+    <script>
+        
+// vector ops
+const add = (x,y) => x.map((e,i)=>e+y[i])
+const sub = (x,y) => x.map((e,i)=>e-y[i])
+const mul = (x,s) => x.map(e=>e*s)
+const div = (x,s) => x.map(e=>e/s)
+const dot = (x,y) => x.map((e,i)=>e*y[i]).reduce((s,t)=>s+t)
+const mag = (x) => Math.sqrt(dot(x,x))
+const normalize = (x) => div(x,mag(x))
+const cross = (x,y) => x.length == 2 ?
+  x[0]*y[1]-x[1]*y[0] :
+  x.map((e,i)=> x[(i+1)%3]*y[(i+2)%3] - x[(i+2)%3]*y[(i+1)%3])
+
+// matrix ops
+const m4row = (m,r) => new m.constructor(4).map((e,i)=>m[r+4*i])
+const m4rowdot = (m,r,v) => m[r]*v[0] + m[r+4]*v[1] + m[r+8]*v[2] + m[r+12]*v[3]
+const m4col = (m,c) => m.slice(c*4,(c+1)*4)
+const m4transpose = (m) => m.map((e,i) => m[((i&3)<<2)+(i>>2)])
+const m4mul = (...args) => args.reduce((m1,m2) => {
+  if(m2.length == 4) return m2.map((e,i)=>m4rowdot(m1,i,m2)) // m*v
+  if(m1.length == 4) return m1.map((e,i)=>m4rowdot(m2,i,m1)) // v*m
+  let ans = new m1.constructor(16)
+  for(let c=0; c<4; c+=1) for(let r=0; r<4; r+=1)
+    ans[r+c*4] = m4rowdot(m1,r,m4col(m2,c))
+  return ans // m*m
+})
+
+// graphics matrices
+const m4trans = (dx,dy,dz) => new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, dx,dy,dz,1])
+const m4rotX = (ang) => { // around x axis
+  let c = Math.cos(ang), s = Math.sin(ang);
+  return new Float32Array([1,0,0,0, 0,c,s,0, 0,-s,c,0, 0,0,0,1]);
+}
+const m4rotY = (ang) => { // around y axis
+  let c = Math.cos(ang), s = Math.sin(ang);
+  return new Float32Array([c,0,-s,0, 0,1,0,0, s,0,c,0, 0,0,0,1]);
+}
+const m4rotZ = (ang) => { // around z axis
+  let c = Math.cos(ang), s = Math.sin(ang);
+  return new Float32Array([c,s,0,0, -s,c,0,0, 0,0,1,0, 0,0,0,1]);
+}
+const m4fixAxes = (f, up) => { // f to -z, up to near +y
+  f = normalize(f)
+  let r = normalize(cross(f,up))
+  let u = cross(r,f)
+  return new Float32Array([
+    r[0],u[0],-f[0],0,
+    r[1],u[1],-f[1],0,
+    r[2],u[2],-f[2],0,
+    0,0,0,1
+  ])
+}
+const m4scale = (sx,sy,sz) => new Float32Array([sx,0,0,0, 0,sy,0,0, 0,0,sz,0, 0,0,0,1])
+const m4view = (eye, center, up) => m4mul(m4fixAxes(sub(center,eye), up), m4trans(-eye[0],-eye[1],-eye[2]))
+const m4perspNegZ = (near, far, fovy, width, height) => {
+  let sy = 1/Math.tan(fovy/2);
+  let sx = sy*height/width;
+  return new Float32Array([sx,0,0,0, 0,sy,0,0, 0,0,-(far+near)/(far-near),-1, 0,0,(2*far*near)/(near-far),0]);
+}
+    </script>
+
+<!-- vertex shader -->
+<script id="vert" type="glsl">
+#version 300 es
+in vec4 position;
+in vec3 normal;
+out vec3 fnormal;
+out vec4 vposition;
+out vec3 vlightdir;
+out vec3 vlightdir2;
+uniform mat4 p;
+uniform mat4 mv;
+uniform mat4 m;
+uniform vec3 lightdir;
+uniform vec3 lightdir2;
+void main() {
+    vposition = position;
+    gl_Position = p * mv * position;
+    vlightdir = lightdir;
+    vlightdir2 = lightdir2;
+    fnormal = mat3(mv) * normal;
+    }
+</script>
+
+<!-- fragment shader -->
+<script id="frag" type="glsl">
+#version 300 es
+precision highp float;
+uniform vec4 color;
+uniform vec3 lightdir;
+uniform vec3 lightdir2;
+uniform vec3 lightcolor;
+uniform vec3 lightcolor2;
+uniform vec3 halfway;
+uniform vec3 halfway2;
+uniform sampler2D aTextureIPlanToUse;
+uniform sampler2D image;
+out vec4 fragColor;
+in vec3 fnormal;
+void main() {
+    vec3 n = normalize(fnormal);
+    float lambert = max(dot(lightdir, n), 0.0);
+    float lambert2 = max(dot(lightdir2, n), 0.0);
+    float blinn = pow(max(dot(halfway, n), 0.0), 150.0);
+    fragColor = vec4(color.rgb * (lightcolor * lambert + lightcolor2 * lambert2), color.a);
+}
+</script>
+
+<script>// configures controls
+/**
+ * Modify this object to chose what options you want in the control pane.
+ * Top-level entries become top-section radio buttons.
+ * Nested entries become lower-section inputs of various types.
+ */
+
+var controlOptions =
+{"terrain":
+    {"label":"spheres"
+    ,"options":
+      {"sphere_num":{"type":"number","default":500,"label":"number of points"}
+      ,"optional":
+        {"type":"radio"
+        ,"options":
+          {"none":"diffuse"
+          }
+        },
+        "mic_x":{"type":"number","default":0.0,"label":"mic x (-0.9 ~ 0.9)"},
+        "mic_y":{"type":"number","default":0.0,"label":"mic y (-0.9 ~ 0.9)"},
+        "mic_z":{"type":"number","default":0.0,"label":"mic z (-0.9 ~ 0.9)"},
+        "time_factor":{"type":"number","default":0.01,"label":"time ratio (s) ( < 0.1)"},
+        "room_factor":{"type":"number","default":10,"label":"room size (m) ( > 10)"},
+        "frame_draw":{"type":"number","default":15000,"label":"number of total frame used for generating plot"}
+      }
+    }
+  }
+</script>
+
+
+<script>
+// const setup
+const IlliniBlue = new Float32Array([0.075, 0.16, 0.292, 1])
+const IlliniOrange = new Float32Array([1, 0.373, 0.02, 1])
+const dirt_color = new Float32Array([0.4196, 0.3294, 0.15686, 1])
+const stone_color = new Float32Array([0.5333, 0.549, 0.5529, 1])
+const ceramic_color = new Float32Array([0.91, 0.62, 0.36, 0.9])
+const IdentityMatrix = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1])
+
+function arrSum(array){
+    let sum = 0
+    if(array.length!=0){
+        sum = array.reduce(function(a, b){
+            return a + b;
+        });
+    }
+    
+    return sum
+}
+
+function arrayEquals(a, b) {
+    return Array.isArray(a) &&
+        Array.isArray(b) &&
+        a.length === b.length &&
+        a.every((val, index) => val === b[index]);
+}
+
+function cloneArray(array) {
+    if (Array.isArray(array)) {
+        return array.map(cloneArray);
+    } else {
+        return array;
+    }
+}
+
+function fibonacciSphere(nPoints) {
+    let vectors = [];
+    let goldenAngle = Math.PI * (3 - Math.sqrt(5));
+
+    for (let i = 0; i < nPoints; i++) {
+        let t = i / nPoints;
+        let inclination = Math.acos(1 - 2 * t);
+        let azimuth = goldenAngle * i;
+
+        let x = Math.sin(inclination) * Math.cos(azimuth);
+        let y = Math.sin(inclination) * Math.sin(azimuth);
+        let z = Math.cos(inclination);
+
+        vectors.push([x, y, z]);
+    }
+
+    return vectors;
+}
+
+function createUVSphere(radius, latRings, lonSlices) {
+    let vertices = [];
+    let indices = [];
+
+    for (let i = 0; i <= latRings; i++) {
+        let theta = (i * Math.PI) / latRings;
+        let sinTheta = Math.sin(theta);
+        let cosTheta = Math.cos(theta);
+
+        for (let j = 0; j <= lonSlices; j++) {
+        let phi = (j * 2 * Math.PI) / lonSlices;
+        let sinPhi = Math.sin(phi);
+        let cosPhi = Math.cos(phi);
+
+        let x = radius * sinTheta * cosPhi;
+        let y = radius * sinTheta * sinPhi;
+        let z = radius * cosTheta;
+
+        vertices.push([x, y, z]);
+        }
+    }
+
+    for (let i = 0; i < latRings; i++) {
+        for (let j = 0; j < lonSlices; j++) {
+        let first = (i * (lonSlices + 1)) + j;
+        let second = first + lonSlices + 1;
+
+        indices.push([first, second, first + 1]);
+        indices.push([second, second + 1, first + 1]);
+        }
+    }
+
+    return { vertices, indices };
+}
+
+function create_gain(sphere_num){
+    gain = []
+    for (let i = 0; i < sphere_num; i++) {
+        gain.push(1)
+    }
+    return gain
+}
+
+function create_distance(sphere_num){
+    distance = []
+    for (let i = 0; i < sphere_num; i++) {
+        distance.push(0)
+    }
+    return distance
+}
+
+function vectorLength(vector) {
+    x = vector[0]
+    y = vector[1]
+    z = vector[2]
+    return Math.sqrt(x * x + y * y + z * z);
+}
+
+function scaleVectors(vectors, scaleFactor) {
+    let scaledVectors = [];
+
+    for (let i = 0; i < vectors.length; i++) {
+        let x = vectors[i][0] * scaleFactor;
+        let y = vectors[i][1] * scaleFactor;
+        let z = vectors[i][2] * scaleFactor;
+
+        scaledVectors.push([x, y, z]);
+    }
+
+    return scaledVectors;
+}
+
+
+// compileAndLinkGLSL for all tasks
+function compileAndLinkGLSL(vs_source, fs_source) {
+    let vs = gl.createShader(gl.VERTEX_SHADER)
+    gl.shaderSource(vs, vs_source)
+    gl.compileShader(vs)
+    if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(vs))
+        throw Error("Vertex shader compilation failed")
+    }
+
+    let fs = gl.createShader(gl.FRAGMENT_SHADER)
+    gl.shaderSource(fs, fs_source)
+    gl.compileShader(fs)
+    if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(fs))
+        throw Error("Fragment shader compilation failed")
+    }
+
+    let program = gl.createProgram()
+    gl.attachShader(program, vs)
+    gl.attachShader(program, fs)
+    gl.linkProgram(program)
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        console.error(gl.getProgramInfoLog(program))
+        throw Error("Linking failed")
+    }
+    
+    return program
+}
+
+// supplyDataBuffer for all tasks
+function supplyDataBuffer(data, cur_program, vsIn, mode) {
+
+    if (mode === undefined) mode = gl.STATIC_DRAW
+    
+    let buf = gl.createBuffer()
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf)
+    let f32 = new Float32Array(data.flat())
+    gl.bufferData(gl.ARRAY_BUFFER, f32, mode)
+    
+    let loc = gl.getAttribLocation(cur_program, vsIn)
+    gl.vertexAttribPointer(loc, data[0].length, gl.FLOAT, false, 0, 0)
+    gl.enableVertexAttribArray(loc)
+    
+    return buf;
+}
+
+
+// setupGeometry for all tasks
+function setupGeometry(geom) {
+    var triangleArray = gl.createVertexArray()
+    gl.bindVertexArray(triangleArray)
+
+    for(let name in geom.attributes) {
+        let data = geom.attributes[name]
+        supplyDataBuffer(data, program, name)
+    }
+
+    var indices = new Uint16Array(geom.triangles.flat())
+    var indexBuffer = gl.createBuffer()
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer)
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW)
+
+    return {
+        mode: gl.TRIANGLES,
+        count: indices.length,
+        type: gl.UNSIGNED_SHORT,
+        vao: triangleArray
+    }
+}
+
+// setupGeometry for all tasks
+function setupLine(geom_lines) {
+    var lineleArray = gl.createVertexArray()
+    gl.bindVertexArray(lineleArray)
+
+    for(let name in geom_lines.attributes) {
+        let data = geom_lines.attributes[name]
+        supplyDataBuffer(data, program, name)
+    }
+
+    var indices = new Uint16Array(geom_lines.lines.flat())
+    var indexBuffer = gl.createBuffer()
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer)
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW)
+
+    return {
+        mode: gl.LINES,
+        count: indices.length,
+        type: gl.UNSIGNED_SHORT,
+        vao: lineleArray
+    }
+}
+
+// draw one frame
+function draw(seconds) {
+    
+    gl.useProgram(program)
+    gl.bindVertexArray(geom.vao)
+
+    let lightdir = normalize([1,1,1])
+    let halfway = normalize(add(lightdir, [0,0,1]))
+    gl.uniform3fv(gl.getUniformLocation(program, 'lightdir'), lightdir)
+    gl.uniform3fv(gl.getUniformLocation(program, 'halfway'), halfway)
+    gl.uniform3fv(gl.getUniformLocation(program, 'lightcolor'), [1,1,1])
+
+    let lightdir2 = normalize([-2,1,-1])
+    let halfway2 = normalize(add(lightdir2, [0,0,1]))
+    gl.uniform3fv(gl.getUniformLocation(program, 'lightdir2'), lightdir2)
+    gl.uniform3fv(gl.getUniformLocation(program, 'halfway2'), halfway2)
+    gl.uniform3fv(gl.getUniformLocation(program, 'lightcolor2'), [1,1,1])
+    
+    let elasticity = 0.6
+
+
+    rot_m = m4rotX(-Math.PI/2)
+    rec_list = []
+    cur_gain_list = []
+    // update each sphere
+    for(i=0;i<sphere_num;i++){
+        dt = seconds - last_second
+        d_vector = []
+        // update position and velocity
+        for(j = 0; j < 3; j++) {
+            d_res = window.spheres[i].rand_v[j] * dt
+            d_vector.push(d_res)
+            window.spheres[i].rand_loc[j] += d_res
+        }
+        d_distance = vectorLength(d_vector)
+        window.distance[i] += d_distance*time_factor*room_factor
+        cur_gain = Math.min(1/window.distance[i],1)
+        window.gain[i] = cur_gain
+        
+        if(window.gain[i]>0.005){
+            // console.log(cur_gain)
+            
+            // Check for collisions with the boundaries
+            for (let j = 0; j < 3; j++) {
+                if(j==1){
+                    elasticity = 0.8
+                }
+                if (window.spheres[i].rand_loc[j]-window.spheres[i].rand_r <= -1) {
+                    window.spheres[i].rand_v[j] = Math.abs(window.spheres[i].rand_v[j]);
+                    window.gain[i] = cur_gain*0.8;
+                }
+                if (window.spheres[i].rand_loc[j]+window.spheres[i].rand_r >= 1) {
+                    window.spheres[i].rand_v[j] = -Math.abs(window.spheres[i].rand_v[j]);
+                    window.gain[i] = cur_gain*0.8;
+                }
+            }
+            
+            color = new Float32Array([window.spheres[i].rand_color[0],window.spheres[i].rand_color[1],window.spheres[i].rand_color[2], cur_gain])
+            mic_res = sub(window.spheres[i].rand_loc,window.mic_loc)
+            if(vectorLength(mic_res)<window.rec_distance){
+                color = new Float32Array([1,0,0,1])
+                rec_list.push(mic_res)
+                cur_gain_list.push(cur_gain)
+                // if(seconds>0.5){
+                //     console.log(cur_gain)
+                // }
+            }
+
+            scale_m = m4scale(window.spheres[i].rand_r,window.spheres[i].rand_r,window.spheres[i].rand_r)
+            trans_m = m4trans(window.spheres[i].rand_loc[0],window.spheres[i].rand_loc[1],window.spheres[i].rand_loc[2])
+            window.m = m4mul(trans_m,m4mul(scale_m,rot_m))
+            
+            gl.uniform4fv(gl.getUniformLocation(program, 'color'), color)
+            gl.uniformMatrix4fv(gl.getUniformLocation(program, 'm'), false,m)
+            gl.uniformMatrix4fv(gl.getUniformLocation(program, 'mv'), false, m4mul(v,m))
+            gl.uniformMatrix4fv(gl.getUniformLocation(program, 'p'), false, p)
+            gl.drawElements(geom.mode, geom.count, geom.type, 0)
+        }
+        
+    }
+
+    window.delaylist.push(seconds*time_factor)
+    arr_sum = arrSum(cur_gain_list)
+    if(totalframe>350 && arr_sum<sphere_num/5){
+        // console.log(arr_sum)
+        window.gainlist.push(arr_sum)
+    }
+    
+
+    document.querySelector('#rec').innerHTML = `sound wave captured: ${rec_list.slice(0,5)}`
+    scale_m = m4scale(0.01,0.01,0.01)
+    trans_m = m4trans(window.mic_loc[0],window.mic_loc[1],window.mic_loc[2])
+    window.m = m4mul(trans_m,m4mul(scale_m,rot_m))
+
+    gl.uniform4fv(gl.getUniformLocation(program, 'color'), new Float32Array([1,0,0,1]))
+    gl.uniformMatrix4fv(gl.getUniformLocation(program, 'm'), false,m)
+    gl.uniformMatrix4fv(gl.getUniformLocation(program, 'mv'), false, m4mul(v,m))
+    gl.uniformMatrix4fv(gl.getUniformLocation(program, 'p'), false, p)
+    gl.drawElements(geom.mode, geom.count, geom.type, 0)
+
+
+    gl.bindVertexArray(geom_room.vao)
+    scale_m = IdentityMatrix
+    trans_m = IdentityMatrix
+    window.m = m4mul(trans_m,m4mul(scale_m,rot_m))
+    gl.uniform4fv(gl.getUniformLocation(program, 'color'), new Float32Array([1,1,1,0.1]))
+    gl.uniformMatrix4fv(gl.getUniformLocation(program, 'm'), false,m)
+    gl.uniformMatrix4fv(gl.getUniformLocation(program, 'mv'), false, m4mul(v,m))
+    gl.uniformMatrix4fv(gl.getUniformLocation(program, 'p'), false, p)
+    gl.drawElements(geom_room.mode, geom_room.count, geom_room.type, 0)
+
+}
+
+// Resizes the canvas to completely fill the screen
+ function fillScreen() {
+    let canvas = document.querySelector('canvas')
+    document.body.style.margin = '0'
+    canvas.style.width = '100vw'
+    canvas.style.height = '100vh'
+    canvas.width = canvas.clientWidth
+    canvas.height = canvas.clientHeight
+    canvas.style.width = ''
+    canvas.style.height = ''
+    if (window.gl) {
+        gl.viewport(0,0, canvas.width, canvas.height)
+        window.p = m4perspNegZ(0.1, 10, 1, canvas.width, canvas.height)
+    }
+}
+
+
+// Compile, link, other option-independent setup
+async function setupterrain(scene,options) {
+    // terrain has shape_n x shape_n as its resolution
+    window.sphere_num = options.sphere_num
+    optional = options.optional
+    mic_x = options.mic_x
+    mic_y = options.mic_y
+    mic_z = options.mic_z
+    window.time_factor = options.time_factor
+    window.room_factor = options.room_factor
+    window.frame_draw = options.frame_draw
+    console.log("optional:",options.optional)
+    
+    
+    
+    let geom = {"attributes":
+  {"position":
+    [[0.850651,0.525731,0]
+    ,[0,-0.850651,0.525731]
+    ,[0,0.850651,-0.525731]
+    ,[0,-0.850651,-0.525731]
+    ,[0,-1,0]
+    ,[1,0,0]
+    ,[-1,0,0]
+    ,[0.809017,0.309017,0.5]
+    ,[0.809017,0.309017,-0.5]
+    ,[-0.809017,0.309017,0.5]
+    ,[-0.809017,0.309017,-0.5]
+    ,[-0.850651,0.525731,0]
+    ,[0.5,0.809017,0.309017]
+    ,[0.5,-0.809017,0.309017]
+    ,[0.5,0.809017,-0.309017]
+    ,[0.5,-0.809017,-0.309017]
+    ,[0.809017,-0.309017,0.5]
+    ,[0.809017,-0.309017,-0.5]
+    ,[-0.5,0.809017,0.309017]
+    ,[-0.809017,-0.309017,0.5]
+    ,[-0.5,0.809017,-0.309017]
+    ,[-0.809017,-0.309017,-0.5]
+    ,[0.850651,-0.525731,0]
+    ,[0,0,1]
+    ,[-0.5,-0.809017,0.309017]
+    ,[0.309017,0.5,0.809017]
+    ,[0,0,-1]
+    ,[0.309017,-0.5,0.809017]
+    ,[-0.5,-0.809017,-0.309017]
+    ,[-0.309017,0.5,0.809017]
+    ,[0.309017,0.5,-0.809017]
+    ,[-0.309017,-0.5,0.809017]
+    ,[0.309017,-0.5,-0.809017]
+    ,[-0.850651,-0.525731,0]
+    ,[-0.309017,0.5,-0.809017]
+    ,[-0.309017,-0.5,-0.809017]
+    ,[0,1,0]
+    ,[0.525731,0,0.850651]
+    ,[0.525731,0,-0.850651]
+    ,[-0.525731,0,0.850651]
+    ,[-0.525731,0,-0.850651]
+    ,[0,0.850651,0.525731]
+    ]
+  ,"normal":
+    [[0.8507,0.5257,0]
+    ,[0,-0.8507,0.5257]
+    ,[0,0.8507,-0.5257]
+    ,[0,-0.8507,-0.5257]
+    ,[0,-1,0]
+    ,[1,0,0]
+    ,[-1,0,0]
+    ,[0.809,0.309,0.5]
+    ,[0.809,0.309,-0.5]
+    ,[-0.809,0.309,0.5]
+    ,[-0.809,0.309,-0.5]
+    ,[-0.8507,0.5257,0]
+    ,[0.5,0.809,0.309]
+    ,[0.5,-0.809,0.309]
+    ,[0.5,0.809,-0.309]
+    ,[0.5,-0.809,-0.309]
+    ,[0.809,-0.309,0.5]
+    ,[0.809,-0.309,-0.5]
+    ,[-0.5,0.809,0.309]
+    ,[-0.809,-0.309,0.5]
+    ,[-0.5,0.809,-0.309]
+    ,[-0.809,-0.309,-0.5]
+    ,[0.8507,-0.5257,0]
+    ,[0,0,1]
+    ,[-0.5,-0.809,0.309]
+    ,[0.309,0.5,0.809]
+    ,[0,0,-1]
+    ,[0.309,-0.5,0.809]
+    ,[-0.5,-0.809,-0.309]
+    ,[-0.309,0.5,0.809]
+    ,[0.309,0.5,-0.809]
+    ,[-0.309,-0.5,0.809]
+    ,[0.309,-0.5,-0.809]
+    ,[-0.8507,-0.5257,0]
+    ,[-0.309,0.5,-0.809]
+    ,[-0.309,-0.5,-0.809]
+    ,[0,1,0]
+    ,[0.5257,0,0.8507]
+    ,[0.5257,0,-0.8507]
+    ,[-0.5257,0,0.8507]
+    ,[-0.5257,0,-0.8507]
+    ,[0,0.8507,0.5257]
+    ]
+  }
+,"triangles":
+  [[0,5,8]
+  ,[0,7,5]
+  ,[0,8,14]
+  ,[0,12,7]
+  ,[0,14,12]
+  ,[1,4,13]
+  ,[1,13,27]
+  ,[1,24,4]
+  ,[1,27,31]
+  ,[1,31,24]
+  ,[2,14,30]
+  ,[2,20,36]
+  ,[2,30,34]
+  ,[2,34,20]
+  ,[2,36,14]
+  ,[3,4,28]
+  ,[3,15,4]
+  ,[3,28,35]
+  ,[3,32,15]
+  ,[3,35,32]
+  ,[4,15,13]
+  ,[4,24,28]
+  ,[5,7,16]
+  ,[5,16,22]
+  ,[5,17,8]
+  ,[5,22,17]
+  ,[6,9,11]
+  ,[6,10,21]
+  ,[6,11,10]
+  ,[6,19,9]
+  ,[6,21,33]
+  ,[6,33,19]
+  ,[7,12,25]
+  ,[7,25,37]
+  ,[7,37,16]
+  ,[8,17,38]
+  ,[8,30,14]
+  ,[8,38,30]
+  ,[9,18,11]
+  ,[9,19,39]
+  ,[9,29,18]
+  ,[9,39,29]
+  ,[10,11,20]
+  ,[10,20,34]
+  ,[10,34,40]
+  ,[10,40,21]
+  ,[11,18,20]
+  ,[12,14,36]
+  ,[12,36,41]
+  ,[12,41,25]
+  ,[13,15,22]
+  ,[13,16,27]
+  ,[13,22,16]
+  ,[15,17,22]
+  ,[15,32,17]
+  ,[16,37,27]
+  ,[17,32,38]
+  ,[18,29,41]
+  ,[18,36,20]
+  ,[18,41,36]
+  ,[19,24,31]
+  ,[19,31,39]
+  ,[19,33,24]
+  ,[21,28,33]
+  ,[21,35,28]
+  ,[21,40,35]
+  ,[23,25,29]
+  ,[23,27,37]
+  ,[23,29,39]
+  ,[23,31,27]
+  ,[23,37,25]
+  ,[23,39,31]
+  ,[24,33,28]
+  ,[25,41,29]
+  ,[26,30,38]
+  ,[26,32,35]
+  ,[26,34,30]
+  ,[26,35,40]
+  ,[26,38,32]
+  ,[26,40,34]
+  ]
+}
+    let geom_room = {"attributes":
+    {"position":
+        [[-1,-1,1]
+        ,[-1,-1,-1]
+        ,[1,-1,-1]
+        ,[1,-1,1]
+
+        ,[-1,1,1]
+        ,[-1,1,-1]
+        ,[1,1,-1]
+        ,[1,1,1]
+        ],
+        "normal":
+    [[1,0,0]
+    ,[1,0,0]
+    ,[0,0,-1]
+    ,[0,0,-1]
+    ,[0,0,0]
+    ,[0,0,0]
+
+    ]
+    }
+    ,"triangles":
+        [[4,5,6]
+        ,[4,6,7]
+        ,[1,0,5]
+        ,[0,4,5]
+        ,[0,1,2]
+        ,[0,2,3]
+        ]
+    }
+    
+    window.geom = setupGeometry(geom,0)
+    window.geom_room = setupGeometry(geom_room,0)
+    window.v = m4view([1,1,3.2], [0,0,0], [0,1,0])
+    window.g_pressed = false
+    window.mode = 0
+    fillScreen()
+    
+
+    // initialize some general parameters
+    window.univers_scale = 1/(sphere_num)+0.01
+    window.spheres = []
+    console.log('window.frame_second',window.frame_second)
+    window.g = [0,-9.80665,0]
+    window.c = 0.05
+    window.max_r = -1
+    window.delaylist = []
+    window.gainlist = []
+
+    space_factor = 100
+
+    let directionVectors = fibonacciSphere(sphere_num)
+
+    let radius = 1;
+    let latRings = 3;
+    let lonSlices = 4;
+
+    // return { vertices, indices }
+    let uvSphere = createUVSphere(radius, latRings, lonSlices);
+
+    window.gain = create_gain(sphere_num);
+    window.distance = create_distance(sphere_num);
+
+    let sound_speed = 331;
+    directionVectors = scaleVectors(directionVectors, sound_speed*time_factor/room_factor);
+
+    window.mic_loc = [mic_x,mic_y,mic_z]
+    window.rec_distance = 0.18
+
+
+    // initialize each sphere with random location, velocity, color, size, mass, and compute accelerate and store them in window.spheres
+    for (i = 0; i < sphere_num; i++) {
+        cur_r = Math.min(univers_scale,0.05)
+        if(cur_r>window.max_r){
+            window.max_r = cur_r
+        }
+        let sphere = {
+            rand_loc: cloneArray(mic_loc),
+            rand_v: directionVectors[i],
+            rand_color: [Math.max(Math.random()/5,0.2), Math.max(Math.random(),0.2), Math.max(Math.random(),0.2)],
+            rand_r: cur_r,
+            mass: 0,
+            rand_acc: [0, 0, 0]
+        };
+        sphere.mass = sphere.rand_r ** 3
+        
+        let drag_f = sphere.rand_v.map(x => x * -c * sphere.rand_r * sphere.rand_r)
+        let drag_acc = drag_f.map(x => 1 / sphere.mass * x)
+        let cur_acc = [0, 0, 0]
+        for (k = 0; k < 3; k++) {
+            cur_acc[k] = g[k] + drag_acc[k]
+        }
+        sphere.rand_acc = cur_acc
+        window.spheres.push(sphere)
+    }
+
+    // compute the grid size based on the size of largest sphere
+    window.max_r = window.max_r*2
+    window.grid_size = Math.ceil(2/window.max_r)+1
+    // initialize grid
+    window.grid = new Array(grid_size)
+    for (let i = 0; i < grid_size; i++) {
+        window.grid[i] = new Array(grid_size)
+        for (let j = 0; j < grid_size; j++) {
+            window.grid[i][j] = new Array(grid_size)
+            for (let k = 0; k < grid_size; k++) {
+                window.grid[i][j][k] = []
+            }
+        }
+    }
+
+    // record which spheres are in each grid
+    for(let i=0;i<spheres.length;i++){
+        x_index = Math.min(Math.max(Math.floor((window.spheres[i].rand_loc[0]+1)/max_r),0),grid_size-1)
+        y_index = Math.min(Math.max(Math.floor((window.spheres[i].rand_loc[1]+1)/max_r),0),grid_size-1)
+        z_index = Math.min(Math.max(Math.floor((window.spheres[i].rand_loc[2]+1)/max_r),0),grid_size-1)
+        window.spheres[i].grid_index = [x_index,y_index,z_index]
+        window.grid[x_index][y_index][z_index].push(i)
+        // console.log(`x_index: ${x_index}, y_index: ${y_index}, z_index: ${z_index}`)
+    }
+    window.totalframe = 0
+    requestAnimationFrame(timeStep);
+}
+
+
+// time setup for all tasks
+function timeStep(milliseconds) {
+    let seconds = milliseconds / 1000;
+    gl.clearColor(...IlliniBlue)
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
+    draw(seconds)
+    frameCount++
+    totalframe++
+    document.querySelector('#frame').innerHTML = `Total frames: ${totalframe}`
+    time_dif = seconds - lastTime_fps
+    if(time_dif>1){
+        fps = frameCount/(time_dif)
+        frameCount = 0
+        lastTime_fps = seconds
+        document.querySelector('#fps').innerHTML = `FPS: ${fps.toFixed(2)}`
+    }
+    // console.log(totalframe)
+    if(totalframe==frame_draw){
+        
+        var data = [{
+            x: window.delaylist,
+            y: window.gainlist,
+            mode:"markers",
+            type:"scatter"
+        }];
+        var layout = {
+            xaxis: {range: [Math.min(window.delaylist), Math.max(window.delaylist)], title: "time"},
+            yaxis: {range: [0, Math.max(window.gainlist)], title: "gain"},
+            title: "gain over time"
+        };
+
+        Plotly.newPlot("myPlot", data, layout);
+    }
+    window.last_second = seconds
+    requestAnimationFrame(timeStep)
+}
+
+// default setupd
+async function setup(event) {
+    window.gl = document.querySelector('canvas').getContext('webgl2',
+        {antialias: false, depth:true, preserveDrawingBuffer:true}
+    )
+    window.last_second = 0
+    window.lastTime_fps = 0
+    window.frameCount = 0
+    window.fps = 0
+    window.count = 10
+    window.record_json = false
+    setupScene('terrain', {'sphere_num':500, 'mic_x':0,'mic_y':0,'mic_z':0, 'time_factor':0.01, 'room_factor':10, 'frame_draw':15000})
+    window.addEventListener('resize', fillScreen)
+}
+
+// Generate geometry, render the scene
+async function setupScene(scene, options) {
+    cancelAnimationFrame(window.pending)
+    console.log("To do: render",scene,"with options",options)
+    let chosen = scene
+    window.program = null
+    window.geom = null
+    // apply shader
+    let vs = document.querySelector('#vert').textContent.trim()
+    let fs = document.querySelector('#frag').textContent.trim()
+    window.program = compileAndLinkGLSL(vs,fs)
+
+    gl.enable(gl.DEPTH_TEST)
+    gl.enable(gl.BLEND)
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+    
+    if(scene=='terrain'){
+        console.log('set up terrain')
+        setupterrain(scene,options)
+    }
+}
+
+window.addEventListener('load', setup)
+window.addEventListener('resize', fillScreen)
+window.keysBeingPressed = {}
+</script>
+
+
+<style>
+    body { margin: 0; border: none; padding: 0; display: flex; }
+    .controls {
+        width: min(50%, 20em); padding: 1em;
+        flex: 0 0 min(50%, 20em);
+    }
+    .controls label { display: block; }
+    .display {
+        flex-grow: 1; height: 100vh;
+        line-height: 0rem;
+    }
+</style>
+</head>
+<body>
+    <div class="controls">
+        <form>
+        <div id="set1"></div>
+        <hr/>
+        <div id="set2"></div>
+        <hr/>
+        <input type="submit" value="Generate object"/>
+        </form>
+    </div>
+    <div class="display"><canvas width="500" height="500"></canvas></div>
+    <div id="myPlot" style="width:600px;height:250px;"></div>
+    <div id="fps" style="position:fixed; top:0; right:0; display:table; color:darkorange; font-size:35px;"></div>
+    <div id="rec" style="position:fixed; top:0; left:0; display:table; color:darkorange; font-size:10px;"></div>
+    <div id="frame" style="position:fixed; bottom:0; left:0; display:table; color:darkorange; font-size:25px;"></div>
+</body>
+</html>
